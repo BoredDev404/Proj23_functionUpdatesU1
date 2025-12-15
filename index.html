@@ -247,11 +247,24 @@
 
     </div>
 
+    <script src="sheets-sync.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js"></script>
     <script src="db.js"></script>
     <script src="app.js"></script>
     
     <script>
+
+        // Initialize sync when page loads
+  document.addEventListener('DOMContentLoaded', async () => {
+    // Test connection on startup
+    const isConnected = await SheetsSync.testConnection();
+    console.log('Google Sheets connection:', isConnected ? '✅ Connected' : '❌ Offline');
+    
+    // Show connection status
+    if (isConnected && window.LifeTrackerApp) {
+      LifeTrackerApp.syncFromSheets();
+    }
+  });
         // Service Worker Registration for PWA
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', function() {
