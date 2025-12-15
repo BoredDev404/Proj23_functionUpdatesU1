@@ -1,12 +1,13 @@
-// service-worker.js
-const CACHE_NAME = 'life-tracker-v8.0';
+// service-worker.js - Updated for Google Sheets Sync
+const CACHE_NAME = 'life-tracker-google-sheets-v1.0';
 const urlsToCache = [
-  '/Proj23_functionUpdatesFinal/',
-  '/Proj23_functionUpdatesFinal/index.html',
-  '/Proj23_functionUpdatesFinal/style.css',
-  '/Proj23_functionUpdatesFinal/app.js',
-  '/Proj23_functionUpdatesFinal/db.js',
-  '/Proj23_functionUpdatesFinal/manifest.json',
+  '/',
+  '/index.html',
+  '/style.css',
+  '/app.js',
+  '/db.js',
+  '/google-sheets.js',
+  '/manifest.json',
   'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css',
   'https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js',
   'https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js'
@@ -23,6 +24,12 @@ self.addEventListener('install', function(event) {
 });
 
 self.addEventListener('fetch', function(event) {
+  // Skip Google Sheets API calls
+  if (event.request.url.includes('google.com/macros') || 
+      event.request.url.includes('script.google.com')) {
+    return;
+  }
+  
   event.respondWith(
     caches.match(event.request)
       .then(function(response) {
@@ -49,3 +56,16 @@ self.addEventListener('activate', function(event) {
     })
   );
 });
+
+// Sync event for background sync
+self.addEventListener('sync', function(event) {
+  if (event.tag === 'google-sheets-sync') {
+    event.waitUntil(syncGoogleSheets());
+  }
+});
+
+async function syncGoogleSheets() {
+  console.log('Background sync: Syncing with Google Sheets...');
+  // This would be called when the device comes back online
+  // The actual sync logic is in the google-sheets.js file
+}
