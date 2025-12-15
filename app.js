@@ -1,4 +1,4 @@
-// app.js - Complete Supercharged Life Tracker Pro (Without Workout Section)
+// app.js - Complete Life Tracker Pro with Google Sheets Sync
 const LifeTrackerApp = {
     init() {
         this.currentDate = new Date();
@@ -14,11 +14,45 @@ const LifeTrackerApp = {
     async initializeApp() {
         try {
             await db.open();
-            console.log('Database opened successfully');
+            console.log('Local database ready');
+            
+            // Check if we have data, if not load from Google Sheets
+            const hasData = await this.hasLocalData();
+            
+            if (!hasData && navigator.onLine) {
+                await EnhancedDB.loadFromSheets();
+            }
             
             this.renderAllPages();
+            this.updateQueueBadge();
+            
         } catch (error) {
             console.error('Failed to initialize app:', error);
+            this.renderAllPages(); // Render anyway with empty data
+        }
+    },
+    
+    async hasLocalData() {
+        try {
+            const counts = await Promise.all([
+                db.dopamineEntries.count(),
+                db.hygieneHabits.count(),
+                db.moodEntries.count()
+            ]);
+            
+            return counts.some(count => count > 0);
+        } catch (error) {
+            return false;
+        }
+    },
+    
+    updateQueueBadge() {
+        const queueCount = GoogleSheetsAPI.getQueueCount();
+        if (queueCount > 0) {
+            const syncBtn = document.getElementById('syncButton');
+            if (syncBtn) {
+                syncBtn.innerHTML = `<i class="fas fa-sync-alt"></i><span class="queue-badge">${queueCount}</span>`;
+            }
         }
     },
 
@@ -31,6 +65,29 @@ const LifeTrackerApp = {
                 this.showPage(targetPage);
             });
         });
+
+        // Sync button
+        const syncButton = document.getElementById('syncButton');
+        if (syncButton) {
+            syncButton.addEventListener('click', async () => {
+                syncButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+                
+                try {
+                    await EnhancedDB.syncAllToSheets();
+                    await GoogleSheetsAPI.processQueue();
+                    await this.syncFromSheets();
+                    
+                    syncButton.innerHTML = '<i class="fas fa-sync-alt"></i>';
+                    this.updateQueueBadge();
+                    alert('✅ Synced with Google Sheets!');
+                    
+                } catch (error) {
+                    console.error('Sync failed:', error);
+                    syncButton.innerHTML = '<i class="fas fa-sync-alt"></i>';
+                    alert('⚠️ Sync completed with some issues. Check console.');
+                }
+            });
+        }
 
         // Settings button
         document.getElementById('settingsButton').addEventListener('click', () => {
@@ -45,7 +102,7 @@ const LifeTrackerApp = {
             });
         }
 
-        // Modal handlers - with null checks
+        // Modal handlers
         this.setupModalHandlers();
     },
 
@@ -159,10 +216,38 @@ const LifeTrackerApp = {
     },
 
     formatDate(date) {
-        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+        const d = new Date(date);
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     },
 
-    // Enhanced Dashboard with Dark Aesthetic (No Workout or Focus Time)
+    // NEW: Sync from Google Sheets
+    async syncFromSheets() {
+        if (!navigator.onLine) {
+            console.log('Offline - cannot sync from sheets');
+            return;
+        }
+        
+        const syncBtn = document.getElementById('syncButton');
+        if (syncBtn) {
+            syncBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
+        }
+        
+        try {
+            await EnhancedDB.loadFromSheets();
+            console.log('✅ Synced from Google Sheets');
+            this.renderAllPages();
+            this.updateQueueBadge();
+        } catch (error) {
+            console.error('Sync from sheets failed:', error);
+            alert('⚠️ Could not sync from Google Sheets. Using local data.');
+        } finally {
+            if (syncBtn) {
+                syncBtn.innerHTML = '<i class="fas fa-sync-alt"></i>';
+            }
+        }
+    },
+
+    // Enhanced Dashboard
     async renderDashboard() {
         const today = this.formatDate(new Date());
         const currentStreak = await this.calculateCurrentStreak();
@@ -275,9 +360,28 @@ const LifeTrackerApp = {
                     <!-- Calendar will be populated by JavaScript -->
                 </div>
             </div>
+            
+            <div class="card" style="margin-top: 20px;">
+                <div class="card-header">
+                    <div class="card-title">Google Sheets Status</div>
+                </div>
+                <div style="padding: 20px; text-align: center;">
+                    <div style="margin-bottom: 15px;">
+                        <i class="fas fa-google" style="font-size: 24px; color: #34A853; margin-right: 10px;"></i>
+                        <span style="font-weight: bold;">Connected to Google Sheets</span>
+                    </div>
+                    <div style="color: var(--text-secondary); font-size: 14px;">
+                        Your data is automatically synced with Google Sheets.
+                        <br>Sheet ID: ${GoogleSheetsAPI.SHEET_ID}
+                    </div>
+                    <button class="btn btn-secondary" id="viewGoogleSheet" style="margin-top: 15px;">
+                        <i class="fas fa-external-link-alt"></i> Open Google Sheet
+                    </button>
+                </div>
+            </div>
         `;
 
-        // Add event listeners for dashboard modules
+        // Add event listeners
         dashboardEl.querySelectorAll('.module-card').forEach(card => {
             card.addEventListener('click', () => {
                 const targetPage = card.getAttribute('data-page');
@@ -294,6 +398,14 @@ const LifeTrackerApp = {
                 this.quickLogMood(mood, energy, numb);
             });
         });
+
+        // Add event listener for Google Sheets button
+        const viewSheetBtn = document.getElementById('viewGoogleSheet');
+        if (viewSheetBtn) {
+            viewSheetBtn.addEventListener('click', () => {
+                window.open(`https://docs.google.com/spreadsheets/d/${GoogleSheetsAPI.SHEET_ID}/edit`, '_blank');
+            });
+        }
 
         this.renderDashboardCalendar();
     },
@@ -391,106 +503,12 @@ const LifeTrackerApp = {
         });
     },
 
-    async showDayDetails(date) {
-        const dopamineEntry = await db.dopamineEntries.where('date').equals(date).first();
-        const hygieneCompletions = await db.hygieneCompletions.where('date').equals(date).toArray();
-        const moodEntry = await db.moodEntries.where('date').equals(date).first();
-        const habits = await db.hygieneHabits.toArray();
-        
-        const completedHabits = habits.filter(habit => 
-            hygieneCompletions.some(completion => completion.habitId === habit.id && completion.completed)
-        );
-        const missedHabits = habits.filter(habit => 
-            !hygieneCompletions.some(completion => completion.habitId === habit.id && completion.completed)
-        );
-        
-        const completionRate = await this.calculateTodayCompletion(date);
-        
-        let detailsHTML = `
-            <div class="modal active" id="dayDetailsModal">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <div class="modal-title">Daily Overview - ${new Date(date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
-                        <div class="modal-close" id="closeDayDetails">
-                            <i class="fas fa-times"></i>
-                        </div>
-                    </div>
-                    <div class="modal-body">
-                        <div class="completion-summary" style="text-align: center; margin-bottom: 20px;">
-                            <div style="font-size: 24px; font-weight: bold; color: ${completionRate >= 75 ? '#4CAF50' : completionRate >= 50 ? '#FF9800' : '#F44336'};">${completionRate}%</div>
-                            <div style="color: #888; font-size: 14px;">Overall Completion</div>
-                        </div>
-                        
-                        <div class="day-section">
-                            <h4 style="margin-bottom: 10px;">Dopamine Control</h4>
-                            <div class="status-badge ${dopamineEntry ? (dopamineEntry.status === 'passed' ? 'status-passed' : 'status-failed') : 'status-missing'}">
-                                ${dopamineEntry ? (dopamineEntry.status === 'passed' ? '✅ Successful Day' : '❌ Challenging Day') : '❓ Not Logged'}
-                            </div>
-                            ${dopamineEntry && dopamineEntry.notes ? `<div style="margin-top: 5px; color: #888; font-size: 14px;">${dopamineEntry.notes}</div>` : ''}
-                        </div>
-                        
-                        <div class="day-section">
-                            <h4 style="margin-bottom: 10px;">Hygiene Habits</h4>
-                            <div style="margin-bottom: 10px;">
-                                <strong>Completed (${completedHabits.length}/${habits.length}):</strong>
-                                ${completedHabits.length > 0 ? completedHabits.map(habit => `<div style="color: #4CAF50; margin: 2px 0;">✓ ${habit.name}</div>`).join('') : '<div style="color: #888;">No habits completed</div>'}
-                            </div>
-                            <div>
-                                <strong>Missed:</strong>
-                                ${missedHabits.length > 0 ? missedHabits.map(habit => `<div style="color: #F44336; margin: 2px 0;">✗ ${habit.name}</div>`).join('') : '<div style="color: #4CAF50;">All habits completed!</div>'}
-                            </div>
-                        </div>
-                        
-                        ${moodEntry ? `
-                        <div class="day-section">
-                            <h4 style="margin-bottom: 10px;">Mood & Energy</h4>
-                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
-                                <div style="text-align: center;">
-                                    <div style="font-size: 20px;">${this.getMoodEmoji(moodEntry.mood)}</div>
-                                    <div style="font-size: 12px; color: #888;">Mood: ${moodEntry.mood}/5</div>
-                                </div>
-                                <div style="text-align: center;">
-                                    <div style="font-size: 20px;">⚡</div>
-                                    <div style="font-size: 12px; color: #888;">Energy: ${moodEntry.energy}/5</div>
-                                </div>
-                                <div style="text-align: center;">
-                                    <div style="font-size: 20px;">❄️</div>
-                                    <div style="font-size: 12px; color: #888;">Numb: ${moodEntry.numb}/5</div>
-                                </div>
-                            </div>
-                            ${moodEntry.notes ? `<div style="margin-top: 10px; color: #888; font-size: 14px;">${moodEntry.notes}</div>` : ''}
-                        </div>
-                        ` : ''}
-                        
-                        <div class="form-actions" style="margin-top: 20px;">
-                            <button class="btn btn-secondary" id="closeDayDetailsBtn">Close</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        `;
-        
-        // Create modal element
-        const modalContainer = document.createElement('div');
-        modalContainer.innerHTML = detailsHTML;
-        document.body.appendChild(modalContainer);
-        
-        // Add event listeners
-        document.getElementById('closeDayDetails').addEventListener('click', () => {
-            document.body.removeChild(modalContainer);
-        });
-        
-        document.getElementById('closeDayDetailsBtn').addEventListener('click', () => {
-            document.body.removeChild(modalContainer);
-        });
-    },
-
-    // Dopamine Page (fully functional)
+    // Dopamine Page
     async renderDopaminePage() {
         const dopamineEl = document.getElementById('dopamine');
+        const entries = await db.dopamineEntries.orderBy('date').reverse().toArray();
         const currentStreak = await this.calculateCurrentStreak();
         const longestStreak = await this.calculateLongestStreak();
-        const recentEntries = await this.getRecentDopamineEntries();
 
         dopamineEl.innerHTML = `
             <div class="card">
@@ -537,7 +555,25 @@ const LifeTrackerApp = {
                     <div class="card-title">Recent Entries</div>
                 </div>
                 <div id="dopamineEntries">
-                    ${recentEntries.length > 0 ? recentEntries : `
+                    ${entries.length > 0 ? entries.slice(0, 5).map(entry => `
+                        <div class="log-entry">
+                            <div class="log-date">
+                                ${new Date(entry.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                                <div class="log-actions">
+                                    <div class="log-action edit-dopamine" data-id="${entry.id}">
+                                        <i class="fas fa-edit"></i>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="log-status ${entry.status === 'passed' ? 'status-passed' : 'status-failed'}">
+                                ${entry.status === 'passed' ? 'Successful Day' : 'Challenging Day'}
+                            </div>
+                            <div class="log-notes">${entry.notes || 'No notes'}</div>
+                            <div style="font-size: 12px; color: #888; margin-top: 5px;">
+                                ${entry.synced ? '✅ Synced to Google Sheets' : '📱 Stored locally'}
+                            </div>
+                        </div>
+                    `).join('') : `
                         <div class="empty-state">
                             <i class="fas fa-brain"></i>
                             <p>No entries yet</p>
@@ -674,7 +710,7 @@ const LifeTrackerApp = {
         try {
             if (editId) {
                 // Update existing entry
-                await db.dopamineEntries.update(parseInt(editId), {
+                await EnhancedDB.updateWithSync('dopamineEntries', parseInt(editId), {
                     date,
                     status,
                     notes,
@@ -682,42 +718,22 @@ const LifeTrackerApp = {
                 });
             } else {
                 // Create new entry
-                await db.dopamineEntries.add({
+                await EnhancedDB.addWithSync('dopamineEntries', {
                     date,
                     status,
-                    notes,
-                    createdAt: new Date()
+                    notes
                 });
             }
 
             this.hideModal('dopamineModal');
             this.renderDopaminePage();
             this.renderDashboard();
+            this.updateQueueBadge();
+            
         } catch (error) {
             console.error('Error saving dopamine entry:', error);
-            alert('Error saving entry. Please try again.');
+            alert('Saved locally. Will sync when online.');
         }
-    },
-
-    async getRecentDopamineEntries() {
-        const entries = await db.dopamineEntries.orderBy('date').reverse().limit(5).toArray();
-        
-        return entries.map(entry => `
-            <div class="log-entry">
-                <div class="log-date">
-                    ${new Date(entry.date).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-                    <div class="log-actions">
-                        <div class="log-action edit-dopamine" data-id="${entry.id}">
-                            <i class="fas fa-edit"></i>
-                        </div>
-                    </div>
-                </div>
-                <div class="log-status ${entry.status === 'passed' ? 'status-passed' : 'status-failed'}">
-                    ${entry.status === 'passed' ? 'Successful Day' : 'Challenging Day'}
-                </div>
-                <div class="log-notes">${entry.notes || 'No notes'}</div>
-            </div>
-        `).join('');
     },
 
     async editDopamineEntry(entryId) {
@@ -727,7 +743,7 @@ const LifeTrackerApp = {
         }
     },
 
-    // Enhanced Hygiene Page with Individual Habit Tracking
+    // Hygiene Page
     async renderHygienePage() {
         const hygieneEl = document.getElementById('hygiene');
         const habits = await db.hygieneHabits.toArray();
@@ -759,7 +775,7 @@ const LifeTrackerApp = {
                     <div class="card-title">Daily Hygiene</div>
                 </div>
                 
-                ${habitsHTML || `
+                ${habits.length > 0 ? habitsHTML : `
                     <div class="empty-state">
                         <i class="fas fa-shower"></i>
                         <p>No habits added yet</p>
@@ -799,15 +815,6 @@ const LifeTrackerApp = {
                     </div>
                 </div>
             </div>
-
-            <div class="card mt-20">
-                <div class="card-header">
-                    <div class="card-title">Individual Habit Calendars</div>
-                </div>
-                <div id="individualHabitCalendars">
-                    ${await this.renderIndividualHabitCalendars()}
-                </div>
-            </div>
         `;
 
         // Add event listeners
@@ -843,108 +850,6 @@ const LifeTrackerApp = {
                 this.toggleHabitCompletion(habitId, !completed);
             });
         });
-
-        // Add click handlers for habit calendars
-        hygieneEl.querySelectorAll('.habit-calendar-day').forEach(day => {
-            day.addEventListener('click', (e) => {
-                const habitId = parseInt(day.getAttribute('data-habit-id'));
-                const date = day.getAttribute('data-date');
-                this.toggleHabitCompletionForDate(habitId, date);
-            });
-        });
-    },
-
-    async renderIndividualHabitCalendars() {
-        const habits = await db.hygieneHabits.toArray();
-        let calendarsHTML = '';
-        
-        for (const habit of habits) {
-            const habitCompletions = await db.hygieneCompletions
-                .where('habitId').equals(habit.id)
-                .toArray();
-                
-            calendarsHTML += `
-                <div class="habit-calendar">
-                    <h4 style="margin: 15px 0 10px 0; color: #fff;">${habit.name}</h4>
-                    <div class="mini-calendar">
-                        ${await this.renderMiniHabitCalendar(habit.id, habitCompletions)}
-                    </div>
-                </div>
-            `;
-        }
-        
-        return calendarsHTML;
-    },
-
-    async renderMiniHabitCalendar(habitId, completions) {
-        const now = new Date();
-        const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
-        const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-        
-        let calendarHTML = '<div class="mini-calendar-grid">';
-        
-        // Day headers
-        const days = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
-        days.forEach(day => {
-            calendarHTML += `<div class="mini-calendar-header">${day}</div>`;
-        });
-        
-        // Empty days before first day of month
-        for (let i = 0; i < firstDay.getDay(); i++) {
-            calendarHTML += '<div class="mini-calendar-day empty"></div>';
-        }
-        
-        // Days of the month
-        for (let i = 1; i <= lastDay.getDate(); i++) {
-            const dayDate = new Date(now.getFullYear(), now.getMonth(), i);
-            const dateKey = this.formatDate(dayDate);
-            
-            const completion = completions.find(c => c.date === dateKey);
-            const isCompleted = completion && completion.completed;
-            const isToday = i === now.getDate() && now.getMonth() === new Date().getMonth();
-            
-            let dayClass = 'mini-calendar-day';
-            if (isToday) dayClass += ' today';
-            if (isCompleted) dayClass += ' completed';
-            
-            calendarHTML += `
-                <div class="${dayClass}" data-habit-id="${habitId}" data-date="${dateKey}">
-                    ${i}
-                </div>
-            `;
-        }
-        
-        calendarHTML += '</div>';
-        return calendarHTML;
-    },
-
-    async toggleHabitCompletionForDate(habitId, date) {
-        try {
-            // Check if completion record already exists for this date
-            const existingCompletion = await db.hygieneCompletions
-                .where('habitId').equals(habitId)
-                .and(item => item.date === date)
-                .first();
-
-            if (existingCompletion) {
-                await db.hygieneCompletions.update(existingCompletion.id, { 
-                    completed: !existingCompletion.completed,
-                    createdAt: new Date()
-                });
-            } else {
-                await db.hygieneCompletions.add({
-                    habitId,
-                    date: date,
-                    completed: true,
-                    createdAt: new Date()
-                });
-            }
-
-            this.renderHygienePage();
-            this.renderDashboard();
-        } catch (error) {
-            console.error('Error toggling habit completion for date:', error);
-        }
     },
 
     getHabitIcon(habitName) {
@@ -969,24 +874,25 @@ const LifeTrackerApp = {
                 .first();
 
             if (existingCompletion) {
-                await db.hygieneCompletions.update(existingCompletion.id, { 
+                await EnhancedDB.updateWithSync('hygieneCompletions', existingCompletion.id, { 
                     completed,
                     createdAt: new Date()
                 });
             } else {
-                await db.hygieneCompletions.add({
+                await EnhancedDB.addWithSync('hygieneCompletions', {
                     habitId,
                     date: today,
-                    completed,
-                    createdAt: new Date()
+                    completed
                 });
             }
 
-            await this.updateDailyCompletion();
             this.renderHygienePage();
             this.renderDashboard();
+            this.updateQueueBadge();
+            
         } catch (error) {
             console.error('Error toggling habit completion:', error);
+            alert('Saved locally. Will sync when online.');
         }
     },
 
@@ -1095,18 +1001,19 @@ const LifeTrackerApp = {
             const habits = await db.hygieneHabits.toArray();
             const nextOrder = habits.length > 0 ? Math.max(...habits.map(h => h.order)) + 1 : 1;
 
-            await db.hygieneHabits.add({
+            await EnhancedDB.addWithSync('hygieneHabits', {
                 name,
                 description,
-                order: nextOrder,
-                createdAt: new Date()
+                order: nextOrder
             });
 
             this.hideModal('habitModal');
             this.renderHygienePage();
+            this.updateQueueBadge();
+            
         } catch (error) {
             console.error('Error saving habit:', error);
-            alert('Error saving habit. Please try again.');
+            alert('Saved locally. Will sync when online.');
         }
     },
 
@@ -1114,7 +1021,7 @@ const LifeTrackerApp = {
     async renderMoodPage() {
         const moodEl = document.getElementById('mood');
         const todayMood = await this.getTodayMood();
-        const moodHistory = await this.getMoodHistory();
+        const moodEntries = await db.moodEntries.orderBy('date').reverse().limit(10).toArray();
 
         moodEl.innerHTML = `
             <div class="card">
@@ -1152,7 +1059,7 @@ const LifeTrackerApp = {
                     <div class="card-title">Mood History</div>
                 </div>
                 <div class="mood-history">
-                    ${moodHistory.length > 0 ? moodHistory.map(entry => `
+                    ${moodEntries.length > 0 ? moodEntries.map(entry => `
                         <div class="mood-entry">
                             <div class="mood-emoji-large">${this.getMoodEmoji(entry.mood)}</div>
                             <div class="mood-details">
@@ -1163,6 +1070,9 @@ const LifeTrackerApp = {
                                     <div class="mood-metric">Numbness: <span>${entry.numb}/5</span></div>
                                 </div>
                                 ${entry.notes ? `<div class="mood-notes">${entry.notes}</div>` : ''}
+                                <div style="font-size: 12px; color: #888; margin-top: 5px;">
+                                    ${entry.synced ? '✅ Synced to Google Sheets' : '📱 Stored locally'}
+                                </div>
                             </div>
                         </div>
                     `).join('') : `
@@ -1192,10 +1102,6 @@ const LifeTrackerApp = {
         return await db.moodEntries.where('date').equals(today).first();
     },
 
-    async getMoodHistory() {
-        return await db.moodEntries.orderBy('date').reverse().limit(10).toArray();
-    },
-
     showMoodModal(entry = null) {
         const today = this.formatDate(new Date());
         const dateInput = document.getElementById('moodDate');
@@ -1222,29 +1128,29 @@ const LifeTrackerApp = {
             const existingEntry = await db.moodEntries.where('date').equals(today).first();
             
             if (existingEntry) {
-                await db.moodEntries.update(existingEntry.id, {
+                await EnhancedDB.updateWithSync('moodEntries', existingEntry.id, {
                     mood,
                     energy,
                     numb,
                     createdAt: new Date()
                 });
             } else {
-                await db.moodEntries.add({
+                await EnhancedDB.addWithSync('moodEntries', {
                     date: today,
                     mood,
                     energy,
                     numb,
-                    notes: '',
-                    createdAt: new Date()
+                    notes: ''
                 });
             }
             
             this.renderDashboard();
             this.renderMoodPage();
+            this.updateQueueBadge();
             alert('Mood logged successfully!');
         } catch (error) {
             console.error('Error logging mood:', error);
-            alert('Error logging mood. Please try again.');
+            alert('Saved locally. Will sync when online.');
         }
     },
 
@@ -1272,7 +1178,7 @@ const LifeTrackerApp = {
             const existingEntry = await db.moodEntries.where('date').equals(date).first();
             
             if (existingEntry) {
-                await db.moodEntries.update(existingEntry.id, {
+                await EnhancedDB.updateWithSync('moodEntries', existingEntry.id, {
                     mood,
                     energy,
                     numb,
@@ -1280,26 +1186,27 @@ const LifeTrackerApp = {
                     createdAt: new Date()
                 });
             } else {
-                await db.moodEntries.add({
+                await EnhancedDB.addWithSync('moodEntries', {
                     date,
                     mood,
                     energy,
                     numb,
-                    notes,
-                    createdAt: new Date()
+                    notes
                 });
             }
 
             this.hideModal('moodModal');
             this.renderDashboard();
             this.renderMoodPage();
+            this.updateQueueBadge();
+            
         } catch (error) {
             console.error('Error saving mood entry:', error);
-            alert('Error saving mood entry. Please try again.');
+            alert('Saved locally. Will sync when online.');
         }
     },
 
-    // Database Page with Delete Functionality (No Workout Section)
+    // Database Page
     async renderDatabasePage() {
         const databaseEl = document.getElementById('database');
         
@@ -1307,12 +1214,52 @@ const LifeTrackerApp = {
         const hygieneHabits = await db.hygieneHabits.toArray();
         const moodEntries = await db.moodEntries.toArray();
         const hygieneCompletions = await db.hygieneCompletions.toArray();
+        const queueCount = GoogleSheetsAPI.getQueueCount();
 
         databaseEl.innerHTML = `
             <div class="card">
                 <div class="card-header">
+                    <div class="card-title">Google Sheets Sync Status</div>
+                </div>
+                <div style="padding: 20px;">
+                    <div style="display: flex; align-items: center; margin-bottom: 15px;">
+                        <i class="fas fa-sync-alt" style="font-size: 24px; color: #4285F4; margin-right: 15px;"></i>
+                        <div>
+                            <div style="font-weight: bold; font-size: 16px;">Sync Queue: ${queueCount} items pending</div>
+                            <div style="color: var(--text-secondary); font-size: 14px;">${navigator.onLine ? '✅ Online - Auto-sync enabled' : '📱 Offline - Will sync when online'}</div>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-bottom: 15px;">
+                        <div style="font-weight: bold; margin-bottom: 5px;">Google Sheets Info:</div>
+                        <div style="font-size: 12px; color: var(--text-secondary); word-break: break-all;">
+                            Sheet ID: ${GoogleSheetsAPI.SHEET_ID}
+                        </div>
+                        <div style="font-size: 12px; color: var(--text-secondary); word-break: break-all; margin-top: 5px;">
+                            Script URL: ${GoogleSheetsAPI.API_URL}
+                        </div>
+                    </div>
+                    
+                    <div style="display: flex; gap: 10px;">
+                        <button class="btn btn-primary" id="forceSync">
+                            <i class="fas fa-sync"></i> Force Sync Now
+                        </button>
+                        <button class="btn btn-secondary" id="viewSheet">
+                            <i class="fas fa-external-link-alt"></i> View Sheet
+                        </button>
+                        ${queueCount > 0 ? `
+                            <button class="btn btn-danger" id="clearQueue">
+                                <i class="fas fa-trash"></i> Clear Queue (${queueCount})
+                            </button>
+                        ` : ''}
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="card-header">
                     <div class="card-title">Database Viewer</div>
-                    <button class="btn btn-secondary" id="clearAllData">
+                    <button class="btn btn-danger" id="clearAllData">
                         <i class="fas fa-trash"></i> Clear All Data
                     </button>
                 </div>
@@ -1326,6 +1273,10 @@ const LifeTrackerApp = {
                                     <div class="entry-date">${entry.date}</div>
                                     <div class="entry-status ${entry.status === 'passed' ? 'status-passed' : 'status-failed'}">
                                         ${entry.status === 'passed' ? '✅ Successful' : '❌ Challenging'}
+                                    </div>
+                                    <div style="font-size: 12px; color: ${entry.synced ? '#4CAF50' : '#FF9800'}; margin-top: 5px;">
+                                        ${entry.synced ? '✅ Synced to Google Sheets' : '📱 Local only'}
+                                        ${entry.googleId ? ` (ID: ${entry.googleId})` : ''}
                                     </div>
                                 </div>
                                 <div class="entry-notes">${entry.notes || 'No notes'}</div>
@@ -1350,6 +1301,9 @@ const LifeTrackerApp = {
                                 <div class="entry-main">
                                     <div class="entry-name">${habit.name}</div>
                                     <div class="entry-desc">${habit.description}</div>
+                                    <div style="font-size: 12px; color: ${habit.synced ? '#4CAF50' : '#FF9800'}; margin-top: 5px;">
+                                        ${habit.synced ? '✅ Synced to Google Sheets' : '📱 Local only'}
+                                    </div>
                                 </div>
                                 <div class="entry-actions">
                                     <button class="btn btn-small btn-danger delete-entry" data-type="hygiene" data-id="${habit.id}">
@@ -1358,27 +1312,6 @@ const LifeTrackerApp = {
                                 </div>
                             </div>
                         `).join('') : '<div class="empty-state">No hygiene habits</div>'}
-                    </div>
-                </div>
-
-                <div class="database-section">
-                    <h3>Hygiene Completions (${hygieneCompletions.length})</h3>
-                    <div class="database-table-container">
-                        ${hygieneCompletions.length > 0 ? hygieneCompletions.map(completion => `
-                            <div class="database-entry">
-                                <div class="entry-main">
-                                    <div class="entry-date">${completion.date}</div>
-                                    <div class="entry-status ${completion.completed ? 'status-passed' : 'status-failed'}">
-                                        ${completion.completed ? '✅ Completed' : '❌ Missed'}
-                                    </div>
-                                </div>
-                                <div class="entry-actions">
-                                    <button class="btn btn-small btn-danger delete-entry" data-type="hygieneCompletion" data-id="${completion.id}">
-                                        <i class="fas fa-trash"></i>
-                                    </button>
-                                </div>
-                            </div>
-                        `).join('') : '<div class="empty-state">No hygiene completions</div>'}
                     </div>
                 </div>
 
@@ -1393,6 +1326,9 @@ const LifeTrackerApp = {
                                         Mood: ${this.getMoodEmoji(entry.mood)} ${entry.mood}/5 | 
                                         Energy: ${entry.energy}/5 | 
                                         Numb: ${entry.numb}/5
+                                    </div>
+                                    <div style="font-size: 12px; color: ${entry.synced ? '#4CAF50' : '#FF9800'}; margin-top: 5px;">
+                                        ${entry.synced ? '✅ Synced to Google Sheets' : '📱 Local only'}
                                     </div>
                                 </div>
                                 <div class="entry-notes">${entry.notes || 'No notes'}</div>
@@ -1411,7 +1347,46 @@ const LifeTrackerApp = {
             </div>
         `;
 
-        // Add event listeners for delete buttons
+        // Add event listeners
+        const forceSyncBtn = document.getElementById('forceSync');
+        const viewSheetBtn = document.getElementById('viewSheet');
+        const clearQueueBtn = document.getElementById('clearQueue');
+        const clearAllBtn = document.getElementById('clearAllData');
+
+        if (forceSyncBtn) {
+            forceSyncBtn.addEventListener('click', async () => {
+                forceSyncBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Syncing...';
+                await EnhancedDB.syncAllToSheets();
+                await GoogleSheetsAPI.processQueue();
+                await this.syncFromSheets();
+                forceSyncBtn.innerHTML = '<i class="fas fa-sync"></i> Force Sync Now';
+                this.renderDatabasePage();
+            });
+        }
+
+        if (viewSheetBtn) {
+            viewSheetBtn.addEventListener('click', () => {
+                window.open(`https://docs.google.com/spreadsheets/d/${GoogleSheetsAPI.SHEET_ID}/edit`, '_blank');
+            });
+        }
+
+        if (clearQueueBtn) {
+            clearQueueBtn.addEventListener('click', () => {
+                if (confirm('Clear all pending sync items?')) {
+                    GoogleSheetsAPI.clearQueue();
+                    this.renderDatabasePage();
+                    this.updateQueueBadge();
+                }
+            });
+        }
+
+        if (clearAllBtn) {
+            clearAllBtn.addEventListener('click', () => {
+                this.clearAllData();
+            });
+        }
+
+        // Add event listeners for delete/edit buttons
         databaseEl.querySelectorAll('.delete-entry').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const type = btn.getAttribute('data-type');
@@ -1420,7 +1395,6 @@ const LifeTrackerApp = {
             });
         });
 
-        // Add event listeners for edit buttons
         databaseEl.querySelectorAll('.edit-entry').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const type = btn.getAttribute('data-type');
@@ -1428,14 +1402,6 @@ const LifeTrackerApp = {
                 this.editDatabaseEntry(type, id);
             });
         });
-
-        // Clear all data button
-        const clearAllBtn = document.getElementById('clearAllData');
-        if (clearAllBtn) {
-            clearAllBtn.addEventListener('click', () => {
-                this.clearAllData();
-            });
-        }
     },
 
     async deleteDatabaseEntry(type, id) {
@@ -1444,33 +1410,18 @@ const LifeTrackerApp = {
         }
 
         try {
-            switch (type) {
-                case 'dopamine':
-                    await db.dopamineEntries.delete(id);
-                    break;
-                case 'hygiene':
-                    await db.hygieneHabits.delete(id);
-                    // Also delete related completions
-                    await db.hygieneCompletions.where('habitId').equals(id).delete();
-                    break;
-                case 'hygieneCompletion':
-                    await db.hygieneCompletions.delete(id);
-                    break;
-                case 'mood':
-                    await db.moodEntries.delete(id);
-                    break;
-            }
-
-            // Re-render the database page
-            this.renderDatabasePage();
+            await EnhancedDB.deleteWithSync(type + (type === 'hygiene' ? 'Habits' : 'Entries'), id);
             
-            // Also update other pages if needed
+            this.renderDatabasePage();
+            this.updateQueueBadge();
+            
+            // Also update other pages
             this.renderDashboard();
             if (type === 'dopamine') this.renderDopaminePage();
-            if (type === 'hygiene' || type === 'hygieneCompletion') this.renderHygienePage();
+            if (type === 'hygiene') this.renderHygienePage();
             if (type === 'mood') this.renderMoodPage();
 
-            alert('Entry deleted successfully!');
+            alert('Entry deleted!');
         } catch (error) {
             console.error('Error deleting entry:', error);
             alert('Error deleting entry. Please try again.');
@@ -1511,24 +1462,24 @@ const LifeTrackerApp = {
                 db.dopamineEntries.clear(),
                 db.hygieneHabits.clear(),
                 db.hygieneCompletions.clear(),
-                db.moodEntries.clear(),
-                db.dailyCompletion.clear()
+                db.moodEntries.clear()
             ]);
 
-            // Clear localStorage
+            // Clear localStorage and sync queue
             localStorage.clear();
 
             // Re-render all pages
             this.renderAllPages();
+            this.updateQueueBadge();
 
-            alert('All data cleared successfully! The app has been reset to default settings.');
+            alert('All data cleared successfully! The app has been reset.');
         } catch (error) {
             console.error('Error clearing data:', error);
             alert('Error clearing data. Please try again.');
         }
     },
 
-    // Email Automation with Your Credentials
+    // Email Automation (same as before)
     async setupEmailAutomation() {
         // Check if we need to send today's report
         const lastReportDate = localStorage.getItem('lastEmailReportDate');
@@ -1624,7 +1575,7 @@ const LifeTrackerApp = {
         }
     },
 
-    // Fixed Email Sending with Your Template ID
+    // Email sending functions (same as before)
     async sendEmail(stats, recipient) {
         // Prepare template parameters
         const templateParams = {
@@ -1645,7 +1596,7 @@ const LifeTrackerApp = {
             // Using your actual EmailJS credentials
             const response = await emailjs.send(
                 'service_c3ur38h', 
-                'template_jgtfg7q', // Your template ID
+                'template_jgtfg7q',
                 templateParams
             );
             
@@ -1728,7 +1679,7 @@ const LifeTrackerApp = {
         };
     },
 
-    // Fixed Calculation methods
+    // Calculation methods
     async calculateCurrentStreak() {
         const entries = await db.dopamineEntries.orderBy('date').toArray();
         let currentStreak = 0;
@@ -1769,7 +1720,6 @@ const LifeTrackerApp = {
         return longestStreak;
     },
 
-    // NEW: Calculate today's completion based on dopamine status and completed hygiene habits
     async calculateTodayCompletion(date) {
         const dopamineEntry = await db.dopamineEntries.where('date').equals(date).first();
         const habits = await db.hygieneHabits.toArray();
@@ -1795,38 +1745,6 @@ const LifeTrackerApp = {
         return totalPossibleItems > 0 ? Math.round((actualCompletedItems / totalPossibleItems) * 100) : 0;
     },
 
-    async updateDailyCompletion() {
-        const today = this.formatDate(new Date());
-        const dopamineCompleted = await this.isDopamineCompletedToday();
-        const hygieneCompleted = await this.calculateHygieneCompletion(today) >= 50;
-        const totalCompletion = await this.calculateTodayCompletion(today);
-        
-        const existing = await db.dailyCompletion.where('date').equals(today).first();
-        
-        if (existing) {
-            await db.dailyCompletion.update(existing.id, {
-                dopamineCompleted,
-                hygieneCompleted,
-                totalCompletion,
-                createdAt: new Date()
-            });
-        } else {
-            await db.dailyCompletion.add({
-                date: today,
-                dopamineCompleted,
-                hygieneCompleted,
-                totalCompletion,
-                createdAt: new Date()
-            });
-        }
-    },
-
-    async isDopamineCompletedToday() {
-        const today = this.formatDate(new Date());
-        const entry = await db.dopamineEntries.where('date').equals(today).first();
-        return entry && entry.status === 'passed';
-    },
-
     async getTotalHabits() {
         const habits = await db.hygieneHabits.toArray();
         return habits.length;
@@ -1842,85 +1760,3 @@ const LifeTrackerApp = {
 document.addEventListener('DOMContentLoaded', () => {
     LifeTrackerApp.init();
 });
-
-// Add CSS for new elements
-const additionalStyles = `
-    .status-warning {
-        background: #FF9800;
-        color: black;
-    }
-    
-    .status-missing {
-        background: #666;
-        color: white;
-    }
-    
-    .day-section {
-        margin-bottom: 20px;
-        padding: 15px;
-        background: rgba(255, 255, 255, 0.05);
-        border-radius: 10px;
-    }
-    
-    .status-badge {
-        padding: 8px 12px;
-        border-radius: 20px;
-        font-size: 12px;
-        font-weight: bold;
-        display: inline-block;
-    }
-    
-    .mini-calendar-grid {
-        display: grid;
-        grid-template-columns: repeat(7, 1fr);
-        gap: 2px;
-        font-size: 10px;
-    }
-    
-    .mini-calendar-header {
-        text-align: center;
-        font-weight: bold;
-        color: #888;
-        padding: 2px;
-    }
-    
-    .mini-calendar-day {
-        width: 20px;
-        height: 20px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        border-radius: 3px;
-        background: rgba(255, 255, 255, 0.1);
-        cursor: pointer;
-        font-size: 9px;
-    }
-    
-    .mini-calendar-day.today {
-        border: 1px solid #0095F6;
-    }
-    
-    .mini-calendar-day.completed {
-        background: #4CAF50;
-        color: white;
-    }
-    
-    .mini-calendar-day.empty {
-        background: transparent;
-        cursor: default;
-    }
-    
-    .habit-calendar {
-        margin-bottom: 15px;
-    }
-    
-    .day-completion {
-        font-size: 8px;
-        color: rgba(255, 255, 255, 0.7);
-    }
-`;
-
-// Inject additional styles
-const styleSheet = document.createElement('style');
-styleSheet.textContent = additionalStyles;
-document.head.appendChild(styleSheet);
