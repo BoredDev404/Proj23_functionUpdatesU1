@@ -1,16 +1,13 @@
-// service-worker.js - Updated for Google Sheets Sync
-const CACHE_NAME = 'life-tracker-google-sheets-v1.0';
+// service-worker.js - Fixed Version
+const CACHE_NAME = 'life-tracker-google-sheets-v2.0';
 const urlsToCache = [
-  '/',
-  '/index.html',
-  '/style.css',
-  '/app.js',
-  '/db.js',
-  '/google-sheets.js',
-  '/manifest.json',
-  'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css',
-  'https://cdn.jsdelivr.net/npm/dexie@3.2.4/dist/dexie.min.js',
-  'https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js'
+  './',
+  './index.html',
+  './style.css',
+  './app.js',
+  './db.js',
+  './google-sheets.js',
+  './manifest.json'
 ];
 
 self.addEventListener('install', function(event) {
@@ -18,7 +15,15 @@ self.addEventListener('install', function(event) {
     caches.open(CACHE_NAME)
       .then(function(cache) {
         console.log('Opened cache');
-        return cache.addAll(urlsToCache);
+        // Try to add all, but don't fail if some fail
+        return Promise.all(
+          urlsToCache.map(function(url) {
+            return cache.add(url).catch(function(error) {
+              console.log('Failed to cache:', url, error);
+              return Promise.resolve(); // Don't fail the entire install
+            });
+          })
+        );
       })
   );
 });
@@ -30,6 +35,12 @@ self.addEventListener('fetch', function(event) {
     return;
   }
   
+  // Skip CDN requests
+  if (event.request.url.includes('cdnjs.cloudflare.com') ||
+      event.request.url.includes('cdn.jsdelivr.net')) {
+    return fetch(event.request);
+  }
+  
   event.respondWith(
     caches.match(event.request)
       .then(function(response) {
@@ -37,8 +48,7 @@ self.addEventListener('fetch', function(event) {
           return response;
         }
         return fetch(event.request);
-      }
-    )
+      })
   );
 });
 
@@ -56,16 +66,3 @@ self.addEventListener('activate', function(event) {
     })
   );
 });
-
-// Sync event for background sync
-self.addEventListener('sync', function(event) {
-  if (event.tag === 'google-sheets-sync') {
-    event.waitUntil(syncGoogleSheets());
-  }
-});
-
-async function syncGoogleSheets() {
-  console.log('Background sync: Syncing with Google Sheets...');
-  // This would be called when the device comes back online
-  // The actual sync logic is in the google-sheets.js file
-}
