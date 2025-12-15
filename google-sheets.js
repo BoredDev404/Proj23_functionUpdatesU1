@@ -1,7 +1,7 @@
 // google-sheets.js - Fixed CORS Version
 const GoogleSheetsAPI = {
     // Your NEW Web App URL from Apps Script (after redeploying)
-    API_URL: 'AKfycbxROHb7Cbr4jad8heCW2lYlYxuqCXihYm-WNsA7rd0O6M1Lh4xS9-Emho8IXptvR7DN',
+    API_URL: 'https://script.google.com/macros/s/AKfycbzNyPTrV1YzhNtamFqN66lnCbtFGyuQkLsOb9zrE6U/dev',
     
     SHEET_ID: '14OscNYrJwQJfo-YxSM-J5m-b-BWptXcNo5LM59tZ1DE',
     
