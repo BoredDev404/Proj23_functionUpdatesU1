@@ -1,27 +1,29 @@
-// google-sheets.js - Free Google Sheets Sync
+// google-sheets.js - Fixed CORS Version
 const GoogleSheetsAPI = {
-    // Your Google Apps Script Web App URL
-    // Replace with: https://script.google.com/macros/s/AKfycbzgFkVLZ9pcgnXoWRxTsEpc7a-LUYcqFeYd3MpVkq8Ew-KHgSwIdb-dsNNlbR_vqwWd/exec
-    API_URL: 'https://script.google.com/macros/s/AKfycbzgFkVLZ9pcgnXoWRxTsEpc7a-LUYcqFeYd3MpVkq8Ew-KHgSwIdb-dsNNlbR_vqwWd/exec',
+    // Your NEW Web App URL from Apps Script (after redeploying)
+    API_URL: 'AKfycbxROHb7Cbr4jad8heCW2lYlYxuqCXihYm-WNsA7rd0O6M1Lh4xS9-Emho8IXptvR7DN',
     
-    // Your Google Sheet ID
     SHEET_ID: '14OscNYrJwQJfo-YxSM-J5m-b-BWptXcNo5LM59tZ1DE',
     
     // Test connection
     async testConnection() {
         try {
-            const response = await fetch(`${this.API_URL}?action=ping&sheet=Dopamine`, {
-                method: 'GET',
-                mode: 'no-cors'
-            });
-            return true;
+            const url = `${this.API_URL}?action=ping&sheet=Dopamine`;
+            console.log('Testing connection to:', url);
+            
+            const response = await fetch(url);
+            if (response.ok) {
+                const result = await response.json();
+                return result.success === true;
+            }
+            return false;
         } catch (error) {
-            console.log('Connection test (no-cors mode)');
-            return true; // Assume connection works for no-cors
+            console.log('Connection test failed:', error.message);
+            return false;
         }
     },
     
-    // Simple API call
+    // Simple API call with CORS handling
     async call(action, sheet, data = {}) {
         const url = `${this.API_URL}?action=${action}&sheet=${sheet}`;
         
@@ -30,27 +32,38 @@ const GoogleSheetsAPI = {
         try {
             const response = await fetch(url, {
                 method: 'POST',
-                mode: 'no-cors',
                 headers: { 
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
                 },
                 body: JSON.stringify(data)
             });
             
-            // With no-cors we can't read response, but we assume it worked
-            console.log(`✅ ${action} request sent to ${sheet}`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
             
-            // Store locally to sync later
-            this.queueForSync(sheet, action, data);
+            const result = await response.json();
             
-            return { success: true, data: { id: data.id || Date.now().toString() } };
+            if (!result.success) {
+                console.error('Sheets API error:', result.error);
+                throw new Error(result.error || 'API call failed');
+            }
+            
+            console.log(`✅ ${action} request successful to ${sheet}`);
+            return result.data;
         } catch (error) {
-            console.warn(`⚠️ ${action} failed (offline mode):`, error.message);
+            console.warn(`⚠️ ${action} failed:`, error.message);
             
-            // Queue for sync when online
+            // Queue for offline sync
             this.queueForSync(sheet, action, data);
             
-            return { success: false, error: 'Offline - queued for sync' };
+            // Return mock response for offline mode
+            return { 
+                success: false, 
+                error: 'Offline - queued for sync',
+                localId: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9)
+            };
         }
     },
     
@@ -62,12 +75,10 @@ const GoogleSheetsAPI = {
             action,
             data,
             timestamp: new Date().toISOString(),
-            id: data.id || Date.now().toString() + Math.random().toString(36).substr(2, 9)
+            id: data.id || 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9)
         });
         
         localStorage.setItem('googleSheetsQueue', JSON.stringify(queue));
-        
-        // Update queue badge
         this.updateQueueBadge(queue.length);
         
         console.log(`📝 Queued ${action} for ${sheet} (${queue.length} items in queue)`);
@@ -75,17 +86,13 @@ const GoogleSheetsAPI = {
     
     // Update queue badge in UI
     updateQueueBadge(count) {
+        const syncBtn = document.getElementById('syncButton');
+        if (!syncBtn) return;
+        
         if (count > 0) {
-            // Add badge to sync button
-            const syncBtn = document.getElementById('syncButton');
-            if (syncBtn) {
-                syncBtn.innerHTML = `<i class="fas fa-sync-alt"></i><span class="queue-badge">${count}</span>`;
-            }
+            syncBtn.innerHTML = `<i class="fas fa-sync-alt"></i><span class="queue-badge">${count}</span>`;
         } else {
-            const syncBtn = document.getElementById('syncButton');
-            if (syncBtn) {
-                syncBtn.innerHTML = '<i class="fas fa-sync-alt"></i>';
-            }
+            syncBtn.innerHTML = '<i class="fas fa-sync-alt"></i>';
         }
     },
     
@@ -106,7 +113,6 @@ const GoogleSheetsAPI = {
         for (let i = 0; i < queue.length; i++) {
             const item = queue[i];
             try {
-                // Try to send to Google Sheets
                 const url = `${this.API_URL}?action=${item.action}&sheet=${item.sheet}`;
                 
                 const response = await fetch(url, {
@@ -118,14 +124,14 @@ const GoogleSheetsAPI = {
                 if (response.ok) {
                     console.log(`✅ Synced: ${item.action} to ${item.sheet}`);
                     queue.splice(i, 1);
-                    i--; // Adjust index after removal
+                    i--;
                 } else {
                     console.warn(`❌ Failed to sync: ${item.action} to ${item.sheet}`);
                     failedItems.push(item);
                 }
                 
-                // Delay to avoid rate limiting
-                await new Promise(resolve => setTimeout(resolve, 500));
+                // Small delay to avoid rate limiting
+                await new Promise(resolve => setTimeout(resolve, 300));
                 
             } catch (error) {
                 console.error(`Error syncing ${item.action}:`, error);
@@ -133,10 +139,7 @@ const GoogleSheetsAPI = {
             }
         }
         
-        // Save back any failed items
         localStorage.setItem('googleSheetsQueue', JSON.stringify(failedItems));
-        
-        // Update badge
         this.updateQueueBadge(failedItems.length);
         
         if (failedItems.length === 0) {
@@ -146,11 +149,18 @@ const GoogleSheetsAPI = {
         }
     },
     
-    // CRUD operations
+    // GET request for fetching data
     async getAll(sheet) {
         try {
             const url = `${this.API_URL}?action=getAll&sheet=${sheet}`;
-            const response = await fetch(url);
+            console.log('Fetching from:', url);
+            
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json'
+                }
+            });
             
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
@@ -182,90 +192,13 @@ const GoogleSheetsAPI = {
         return this.call('delete', sheet, { id });
     },
     
-    // Sync local data to Google Sheets
-    async syncLocalToSheets(sheetName, localData) {
-        if (!navigator.onLine) {
-            console.log('Offline - cannot sync to sheets');
-            return false;
-        }
-        
-        try {
-            // Get existing data from sheets
-            const remoteData = await this.getAll(sheetName);
-            
-            // Find differences and sync
-            const changes = this.findChanges(localData, remoteData);
-            
-            if (changes.length > 0) {
-                console.log(`Syncing ${changes.length} changes to ${sheetName}`);
-                
-                for (const change of changes) {
-                    await this.call(change.type, sheetName, change.data);
-                    await new Promise(resolve => setTimeout(resolve, 300)); // Delay
-                }
-                
-                return true;
-            }
-            
-            return false;
-        } catch (error) {
-            console.error('Sync failed:', error);
-            return false;
-        }
-    },
-    
-    // Find differences between local and remote
-    findChanges(localData, remoteData) {
-        const changes = [];
-        const remoteMap = new Map(remoteData.map(item => [item.id, item]));
-        
-        // Check for updates or new items
-        localData.forEach(localItem => {
-            const remoteItem = remoteMap.get(localItem.id);
-            
-            if (!remoteItem) {
-                // New item
-                changes.push({ type: 'add', data: localItem });
-            } else if (this.hasChanges(localItem, remoteItem)) {
-                // Updated item
-                changes.push({ type: 'update', data: localItem });
-            }
-            
-            remoteMap.delete(localItem.id);
-        });
-        
-        // Items in remote but not local (deleted)
-        remoteMap.forEach(remoteItem => {
-            changes.push({ type: 'delete', data: { id: remoteItem.id } });
-        });
-        
-        return changes;
-    },
-    
-    hasChanges(item1, item2) {
-        const keys = new Set([...Object.keys(item1), ...Object.keys(item2)]);
-        
-        for (let key of keys) {
-            if (key === 'synced' || key === 'createdAt') continue;
-            
-            const val1 = item1[key];
-            const val2 = item2[key];
-            
-            if (val1 !== val2) {
-                return true;
-            }
-        }
-        
-        return false;
-    },
-    
     // Get queue count
     getQueueCount() {
         const queue = JSON.parse(localStorage.getItem('googleSheetsQueue') || '[]');
         return queue.length;
     },
     
-    // Clear queue (for testing)
+    // Clear queue
     clearQueue() {
         localStorage.removeItem('googleSheetsQueue');
         this.updateQueueBadge(0);
@@ -275,8 +208,10 @@ const GoogleSheetsAPI = {
 
 // Initialize queue badge on load
 window.addEventListener('load', () => {
-    const queueCount = GoogleSheetsAPI.getQueueCount();
-    GoogleSheetsAPI.updateQueueBadge(queueCount);
+    setTimeout(() => {
+        const queueCount = GoogleSheetsAPI.getQueueCount();
+        GoogleSheetsAPI.updateQueueBadge(queueCount);
+    }, 1000);
 });
 
 // Auto-sync when coming online
@@ -288,7 +223,7 @@ window.addEventListener('online', () => {
     if (window.LifeTrackerApp && typeof LifeTrackerApp.syncFromSheets === 'function') {
         setTimeout(() => {
             LifeTrackerApp.syncFromSheets();
-        }, 2000);
+        }, 3000);
     }
 });
 
